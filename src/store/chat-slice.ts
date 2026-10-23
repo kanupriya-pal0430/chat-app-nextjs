@@ -15,7 +15,9 @@ export type Outgoing = {
   status: "queued" | "sending" | "failed";
   error: string | null;
 };
+
 export type SyncState = "loading" | "ready" | "error";
+
 export interface ChatState {
   messages: Record<string, Message>;
   outbox: Record<string, Outgoing>;
@@ -25,6 +27,7 @@ export interface ChatState {
   online: boolean;
   typing: Record<string, boolean>;
 }
+
 export const initialChatState: ChatState = {
   messages: {},
   outbox: {},
@@ -34,6 +37,7 @@ export const initialChatState: ChatState = {
   online: false,
   typing: {},
 };
+
 const slice = createSlice({
   name: "chat",
   initialState: initialChatState,
@@ -46,34 +50,66 @@ const slice = createSlice({
       }>
     ) {
       const { conversationId, messages } = action.payload;
-    
+
       for (const message of messages) {
         state.messages[message.id] = message;
+
+        if (message.clientNonce) {
+          const pending = state.outbox[message.clientNonce];
+
+          if (pending?.conversationId === message.conversationId) {
+            delete state.outbox[message.clientNonce];
+          }
+        }
       }
-    
-      const previousCursor =
-        state.syncedThrough[conversationId] ?? 0;
-    
+
       const highestReceivedSeq = messages.reduce(
-        (highest, message) =>
-          Math.max(highest, message.seq),
+        (highest, message) => Math.max(highest, message.seq),
         0
       );
-    
-      state.syncedThrough[conversationId] = Math.max(
-        previousCursor,
-        highestReceivedSeq
-      );
-    },
-    receiveMessages(state, action: PayloadAction<Message[]>) {
-      for (const m of action.payload) {
-        state.messages[m.id] = m;
-        if (m.clientNonce) delete state.outbox[m.clientNonce];
+
+      if (state.syncedThrough[conversationId] === undefined) {
+        state.syncedThrough[conversationId] = highestReceivedSeq;
       }
     },
+
+    receiveMessages(state, action: PayloadAction<Message[]>) {
+      for (const message of action.payload) {
+        state.messages[message.id] = message;
+
+        if (message.clientNonce) {
+          const pending = state.outbox[message.clientNonce];
+
+          if (pending?.conversationId === message.conversationId) {
+            delete state.outbox[message.clientNonce];
+          }
+        }
+      }
+    },
+
     queueMessage(state, action: PayloadAction<Outgoing>) {
       state.outbox[action.payload.clientNonce] = action.payload;
     },
+
+    restoreOutbox(state, action: PayloadAction<Outgoing[]>) {
+      const confirmedNonces = new Set(
+        Object.values(state.messages)
+          .map((message) => message.clientNonce)
+          .filter((nonce): nonce is string => Boolean(nonce))
+      );
+
+      for (const item of action.payload) {
+        if (confirmedNonces.has(item.clientNonce)) continue;
+        if (state.outbox[item.clientNonce]) continue;
+
+        state.outbox[item.clientNonce] = {
+          ...item,
+          status: item.status === "sending" ? "queued" : item.status,
+          error: item.status === "sending" ? null : item.error,
+        };
+      }
+    },
+
     setOutgoingStatus(
       state,
       action: PayloadAction<{
@@ -83,46 +119,66 @@ const slice = createSlice({
       }>
     ) {
       const item = state.outbox[action.payload.nonce];
+
       if (item) {
         item.status = action.payload.status;
         item.error = action.payload.error ?? null;
       }
     },
+
     requeueSending(state) {
-      for (const item of Object.values(state.outbox))
-        if (item.status === "sending") item.status = "queued";
+      for (const item of Object.values(state.outbox)) {
+        if (item.status === "sending") {
+          item.status = "queued";
+        }
+      }
     },
+
     setOnline(state, action: PayloadAction<boolean>) {
       state.online = action.payload;
     },
+
     setSyncStatus(
       state,
-      action: PayloadAction<{ status: SyncState; error?: string }>
+      action: PayloadAction<{
+        status: SyncState;
+        error?: string;
+      }>
     ) {
       state.syncState = action.payload.status;
       state.syncError = action.payload.error ?? null;
     },
+
     markSynced(
       state,
-      action: PayloadAction<{ conversationId: string; seq: number }>
+      action: PayloadAction<{
+        conversationId: string;
+        seq: number;
+      }>
     ) {
       state.syncedThrough[action.payload.conversationId] = Math.max(
         state.syncedThrough[action.payload.conversationId] ?? 0,
         action.payload.seq
       );
     },
+
     setTyping(
       state,
-      action: PayloadAction<{ userId: string; isTyping: boolean }>
+      action: PayloadAction<{
+        userId: string;
+        isTyping: boolean;
+      }>
     ) {
       state.typing[action.payload.userId] = action.payload.isTyping;
     },
   },
 });
+
 export const {
   hydrate,
   receiveMessages,
   queueMessage,
+  restoreOutbox,
   setOutgoingStatus,
   requeueSending,
   setOnline,
@@ -130,53 +186,73 @@ export const {
   markSynced,
   setTyping,
 } = slice.actions;
+
 export const chatReducer = slice.reducer;
+
 type StoreState = { chat: ChatState };
+
 export const selectOnline = (state: StoreState) => state.chat.online;
+
 export const selectSyncStatus = (state: StoreState) => state.chat.syncState;
+
 export const selectSyncError = (state: StoreState) => state.chat.syncError;
+
 export const selectOutbox = (state: StoreState) => state.chat.outbox;
+
 export const selectTyping = (state: StoreState) => state.chat.typing;
+
 const selectMessagesById = (state: StoreState) => state.chat.messages;
+
 const selectOutboxById = (state: StoreState) => state.chat.outbox;
+
 const selectConversationId = (_state: StoreState, conversationId: string) =>
   conversationId;
-// Memoized: sorting/filtering never occurs in a render body or on unrelated state changes.
+
 export const selectLatestByConversation = createSelector(
   [selectMessagesById],
   (byId) => {
     const latest: Record<string, Message> = {};
-    for (const m of Object.values(byId)) {
-      if (!latest[m.conversationId] || latest[m.conversationId].seq < m.seq)
-        latest[m.conversationId] = m;
+
+    for (const message of Object.values(byId)) {
+      if (
+        !latest[message.conversationId] ||
+        latest[message.conversationId].seq < message.seq
+      ) {
+        latest[message.conversationId] = message;
+      }
     }
+
     return latest;
   }
 );
+
 export const selectConversationMessages = createSelector(
   [selectMessagesById, selectOutboxById, selectConversationId],
   (byId, outbox, id) => {
     const delivered = Object.values(byId)
-      .filter((m) => m.conversationId === id)
+      .filter((message) => message.conversationId === id)
       .sort((a, b) => a.seq - b.seq);
+
     const pending = Object.values(outbox)
-      .filter((m) => m.conversationId === id)
-      .map((o) => ({
-        id: o.clientNonce,
+      .filter((message) => message.conversationId === id)
+      .map((item) => ({
+        id: item.clientNonce,
         seq: Number.MAX_SAFE_INTEGER,
-        conversationId: o.conversationId,
+        conversationId: item.conversationId,
         senderId: "__self__",
-        body: o.body,
-        media: o.media,
+        body: item.body,
+        media: item.media,
         forwardedFromId: null,
-        clientNonce: o.clientNonce,
-        createdAt: o.createdAt,
-        status: o.status,
-        error: o.error,
+        clientNonce: item.clientNonce,
+        createdAt: item.createdAt,
+        status: item.status,
+        error: item.error,
       }));
+
     return [...delivered, ...pending];
   }
 );
+
 export type ViewMessage = Message & {
   status?: Outgoing["status"];
   error?: string | null;

@@ -1,4 +1,3 @@
-// A long-lived Node process is required for Socket.IO. Do not deploy this as serverless functions.
 import { createServer } from "node:http";
 import next from "next";
 import { Server } from "socket.io";
@@ -48,6 +47,21 @@ async function bootstrap() {
       maxDisconnectionDuration: 120_000,
       skipMiddlewares: false,
     },
+    allowRequest: (req, callback) => {
+      const origin = req.headers.origin;
+      const expected = process.env.APP_ORIGIN;
+
+      if (!origin || !expected) {
+        callback("Origin not allowed", false);
+        return;
+      }
+
+      try {
+        callback(null, new URL(origin).origin === new URL(expected).origin);
+      } catch {
+        callback("Invalid origin", false);
+      }
+    },
   });
   io.use((socket, nextMiddleware) => {
     try {
@@ -74,6 +88,17 @@ async function bootstrap() {
     };
     const stillAuthenticated = () =>
       userForCookieHeader(socket.handshake.headers.cookie)?.id === user.id;
+
+    const sessionCheck = setInterval(() => {
+      if (!stillAuthenticated()) {
+        socket.disconnect(true);
+      }
+    }, 5000);
+
+    socket.on("disconnect", () => {
+      clearInterval(sessionCheck);
+    });
+
     const ackError = (err: unknown): SendAck =>
       err instanceof MessageError
         ? { ok: false, code: err.code, error: err.message }

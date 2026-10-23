@@ -1,6 +1,10 @@
 "use client";
-import { useState, type DragEvent } from "react";
 import Link from "next/link";
+import { useLayoutEffect, useState, type DragEvent } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import type { User, Conversation, Message } from "@/lib/shared/types";
+import { hydrate } from "@/store/chat-slice";
+import { clearOutbox } from "@/store/outbox-storage";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -13,8 +17,6 @@ import {
   Sparkles,
   WifiOff,
 } from "lucide-react";
-import { useSelector } from "react-redux";
-import type { User, Conversation } from "@/lib/shared/types";
 import type { RootState } from "@/store";
 import {
   selectConversationMessages,
@@ -31,12 +33,18 @@ export function ChatShell({
   user,
   conversations,
   conversationId,
+  initialMessages,
 }: {
   user: User;
   conversations: Conversation[];
   conversationId: string;
+  initialMessages: Message[];
 }) {
   const router = useRouter();
+  const dispatch = useDispatch();
+  useLayoutEffect(() => {
+    dispatch(hydrate({ conversationId, messages: initialMessages }));
+  }, [dispatch, conversationId, initialMessages]);
   const [search, setSearch] = useState("");
   const [hoverTarget, setHoverTarget] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -80,10 +88,16 @@ export function ChatShell({
   const logout = async () => {
     setLoggingOut(true);
     setLogoutError(null);
+
     try {
-      const response = await fetch("/api/auth/logout", { method: "POST" });
-      if (!response.ok)
+      const response = await fetch("/api/auth/logout", {
+        method: "POST",
+      });
+
+      if (!response.ok) {
         throw new Error("Could not sign out. Please try again.");
+      }
+      clearOutbox(user.id);
       router.replace("/login");
       router.refresh();
     } catch (err) {
