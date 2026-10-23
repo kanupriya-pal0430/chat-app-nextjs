@@ -48,12 +48,13 @@ export async function POST(request: NextRequest) {
     );
   const bytes = Buffer.from(await file.arrayBuffer());
   const sniffed = await fileTypeFromBuffer(bytes);
-  const kind = sniffed && accepted[sniffed.mime];
-  if (!kind || sniffed?.mime !== file.type)
+  const kind = sniffed ? accepted[sniffed.mime] : undefined;
+  if (!kind) {
     return NextResponse.json(
-      { error: "Unsupported or mismatched media type" },
+      { error: "Unsupported media format" },
       { status: 415 }
     );
+  }
   const { CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } =
     process.env;
   if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET)

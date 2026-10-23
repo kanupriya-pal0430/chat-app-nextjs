@@ -48,16 +48,19 @@ async function bootstrap() {
       skipMiddlewares: false,
     },
     allowRequest: (req, callback) => {
-      const origin = req.headers.origin;
+      const origin = req.headers.origin ?? req.headers.referer;
       const expected = process.env.APP_ORIGIN;
-
+    
       if (!origin || !expected) {
         callback("Origin not allowed", false);
         return;
       }
-
+    
       try {
-        callback(null, new URL(origin).origin === new URL(expected).origin);
+        callback(
+          null,
+          new URL(origin).origin === new URL(expected).origin
+        );
       } catch {
         callback("Invalid origin", false);
       }

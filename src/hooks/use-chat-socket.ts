@@ -115,6 +115,7 @@ export function useChatSocket(conversationId: string) {
       autoConnect: false,
       withCredentials: true,
       reconnection: true,
+      transports: ["websocket"],
     });
 
     socketRef.current = socket;
@@ -252,10 +253,9 @@ export function useChatSocket(conversationId: string) {
       activeSync?.abort();
 
       dispatch(setOnline(false));
-
       inflight.current.clear();
+      forwarding.current.clear();
       dispatch(requeueSending());
-
       clearTimers();
     };
 
