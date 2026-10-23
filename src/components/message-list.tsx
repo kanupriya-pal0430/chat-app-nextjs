@@ -12,7 +12,27 @@ import {
 } from "lucide-react";
 import type { Conversation } from "@/lib/shared/types";
 import type { SyncState, ViewMessage } from "@/store/chat-slice";
+function MessageTime({ createdAt }: { createdAt: string }) {
+  const [formatted, setFormatted] = useState("");
 
+  useEffect(() => {
+    const date = new Date(createdAt);
+
+    if (Number.isNaN(date.getTime())) {
+      setFormatted("");
+      return;
+    }
+
+    setFormatted(
+      date.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    );
+  }, [createdAt]);
+
+  return <time dateTime={createdAt}>{formatted}</time>;
+}
 type Props = {
   messages: ViewMessage[];
   selfId: string;
@@ -80,13 +100,6 @@ export function MessageList({
           {messages.map((message) => {
             const pending = "status" in message;
             const own = message.senderId === selfId || pending;
-            const created = new Date(message.createdAt);
-            const formatted = Number.isNaN(created.getTime())
-              ? ""
-              : created.toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                });
             return (
               <motion.div
                 key={message.id}
@@ -152,8 +165,8 @@ export function MessageList({
                     />
                   )}
                   <div className="message-meta">
-                    <time dateTime={message.createdAt}>{formatted}</time>
-                    {own &&
+                  <MessageTime createdAt={message.createdAt} />                    
+                  {own &&
                       (pending ? (
                         <Clock3 size={12} aria-label="Pending delivery" />
                       ) : (
