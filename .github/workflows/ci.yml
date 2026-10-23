@@ -1,0 +1,41 @@
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    env:
+      APP_ORIGIN: http://127.0.0.1:3000
+      DATABASE_PATH: ./data/chat.db
+      ALICE_PASSWORD: ci-ada-test-password
+      BOB_PASSWORD: ci-grace-test-password
+      CHARLIE_PASSWORD: ci-linus-test-password
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
