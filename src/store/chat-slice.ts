@@ -90,6 +90,10 @@ const slice = createSlice({
     queueMessage(state, action: PayloadAction<Outgoing>) {
       state.outbox[action.payload.clientNonce] = action.payload;
     },
+ 
+    clearPendingOutbox(state) {
+      state.outbox = {};
+    },
 
     restoreOutbox(state, action: PayloadAction<Outgoing[]>) {
       const confirmedNonces = new Set(
@@ -180,6 +184,7 @@ export const {
   queueMessage,
   restoreOutbox,
   setOutgoingStatus,
+  clearPendingOutbox,
   requeueSending,
   setOnline,
   setSyncStatus,

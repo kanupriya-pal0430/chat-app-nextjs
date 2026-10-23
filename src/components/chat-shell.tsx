@@ -3,7 +3,7 @@ import Link from "next/link";
 import { useLayoutEffect, useState, type DragEvent } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import type { User, Conversation, Message } from "@/lib/shared/types";
-import { hydrate } from "@/store/chat-slice";
+import { hydrate, clearPendingOutbox } from "@/store/chat-slice";
 import { clearOutbox } from "@/store/outbox-storage";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
@@ -85,26 +85,33 @@ export function ChatShell({
     )
       forward(sourceId, destination);
   };
+
   const logout = async () => {
     setLoggingOut(true);
     setLogoutError(null);
-
+  
     try {
       const response = await fetch("/api/auth/logout", {
         method: "POST",
       });
-
+  
       if (!response.ok) {
         throw new Error("Could not sign out. Please try again.");
       }
+  
+      dispatch(clearPendingOutbox());
       clearOutbox(user.id);
+  
       router.replace("/login");
       router.refresh();
     } catch (err) {
-      setLogoutError(err instanceof Error ? err.message : "Sign-out failed.");
+      setLogoutError(
+        err instanceof Error ? err.message : "Sign-out failed."
+      );
       setLoggingOut(false);
     }
   };
+  
   return (
     <div className="app-layout">
       <aside className="sidebar" aria-label="Conversations">
