@@ -1,0 +1,21 @@
+# Dependencies
+/node_modules/
+
+# Next.js build files
+/.next/
+
+# Environment variables and secrets
+.env*
+!.env.example
+
+# SQLite database
+/data/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# macOS files
+.DS_Store
+
+# Debug logs
+*.log
