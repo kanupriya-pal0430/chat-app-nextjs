@@ -1,115 +1,158 @@
-# Relay — production-minded real-time chat
+# Relay
 
-A Next.js App Router + Redux Toolkit + TypeScript chat assessment. Direct (one-to-one) conversations, text and Cloudinary-backed images/video, accessible drag-or-click forwarding, persistent drafts, and server-authoritative WebSocket messages.
+Real-time one-to-one messaging built with Next.js App Router, TypeScript, Redux Toolkit, Socket.IO, SQLite, and Cloudinary.
 
-> **Deployment scope:** designed for a **single long-running Node process** with a persistent filesystem, suitable for a controlled assessment / single-node staging environment. It is not a claim of audited, horizontally scalable production readiness. See [Hardening and deferred work](#hardening-and-deferred-work).
+The main design choice is straightforward: **SQLite is the source of truth; WebSockets are the delivery mechanism.** A message is committed before it is broadcast, and clients reconcile incoming events against server-assigned message IDs. If a connection drops, the client requests missed messages from the database instead of assuming Socket.IO delivered everything.
 
-## Quick start
+This repository targets a **single Node.js instance with persistent local storage**. It is suitable for local evaluation and single-node staging; it is not presented as a horizontally scalable hosted chat service.
 
-Requirements: Node 20+, npm, a writable local filesystem. Cloudinary credentials are required for media, but text chat works without them.
+## Getting started
+
+**Prerequisites:** Node.js 22 (the version used in CI), npm, a writable filesystem, and a Cloudinary account if you want to send media.
 
 ```bash
 cp .env.example .env.local
-# Edit ALICE_PASSWORD, BOB_PASSWORD and CHARLIE_PASSWORD (required, distinct and strong)
-# Set CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET for uploads
-npm install
+npm ci
 npm run dev
-# Open http://127.0.0.1:3000
 ```
 
-Sign in as **Ada Lovelace**, **Grace Hopper**, or **Linus Torvalds** using the corresponding password. Use a normal and private browser session, or two browsers, to test both participants without sharing cookies. SQLite creates three seed users and one-to-one conversations between each pair on first boot. Existing credentials are not reset by changing `.env.local`; delete the local `data/` database to reseed (destructive).
+Open `http://127.0.0.1:3000`.
+
+Configure these values in `.env.local` before the first launch:
+
+| Variable | Purpose |
+| --- | --- |
+| `APP_ORIGIN` | Exact browser origin, e.g. `http://127.0.0.1:3000`. Used to validate state-changing requests. |
+| `PORT`, `HOSTNAME` | Local HTTP server configuration. |
+| `DATABASE_PATH` | SQLite path; defaults to `./data/chat.db`. |
+| `ALICE_PASSWORD`, `BOB_PASSWORD`, `CHARLIE_PASSWORD` | Passwords for the three seeded test accounts. |
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | Server-side media upload credentials. Required only for attachments. |
+
+On first startup, the database seeds **Ada Lovelace**, **Grace Hopper**, and **Linus Torvalds**, along with their direct conversations. Use separate browser sessions (for example, normal and incognito windows) to sign in as two users simultaneously.
+
+The account passwords are hashed when the database is first created. Changing `.env.local` later does **not** reset existing accounts. To reset a local test database, stop the server, back up `data/`, and reseed deliberately; removing the database deletes existing messages and sessions.
 
 ```bash
-npm run typecheck    # TypeScript strict mode
-npm test             # unit, component and database integrity tests
-npm run test:watch
-npm run build
-npm start            # starts Next and Socket.IO in the same Node process
+npm test             # Vitest: reducers, components, validation, persistence
+npm run typecheck    # Strict TypeScript
+npm run build        # Next.js production build
+npm start            # Custom Node server (Next.js + Socket.IO)
 ```
 
-Cloudinary uploads enforce the 15 MB cap and MIME allowlist **on the server** using binary magic-byte sniffing, not just the browser's `File.type`. Upload progress indicates transfer from the browser to the application server; the cloud-processing phase may continue briefly afterwards. Missing Cloudinary credentials produce a recoverable configuration error.
+`npm start` requires a completed build. This project uses a custom long-running Node server; a serverless deployment that only serves Next.js routes will not host the Socket.IO process as written.
 
-## What is implemented
+**Local troubleshooting:** A `403` on login usually means the request origin does not match `APP_ORIGIN` (for this check, `localhost` and `127.0.0.1` are different). An upload `502` typically requires checking the server log and Cloudinary cloud name/credentials. Restart the server after changing `.env.local`.
 
-| Requirement         | Implementation                                                                                                                             |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| App Router / SSR    | `/chats/[conversationId]` is a Server Component; latest 50 messages and contacts loaded directly from SQLite before hydration              |
-| Real-time transport | Same-origin Socket.IO with per-conversation rooms, session-authenticated sockets, typed event contracts, acknowledgments                   |
-| Persistence         | SQLite WAL; monotonic `seq`, unique `(senderId, clientNonce)`, atomic sends/forwards                                                       |
-| Reconnect           | Socket reconnect + authenticated REST replay after last synchronized sequence; normalized ID upsert removes duplicates                     |
-| Drafts              | `localStorage` key `relay:draft:<userId>:<conversationId>`, restored on full reload, scoped to conversation                                |
-| Media               | Authenticated `POST /api/upload`, size/magic-byte checks, Cloudinary upload stream, ownership-bound upload IDs                             |
-| Forward             | Drag a delivered message to another contact, **or** use its keyboard-accessible Forward button; server copies authorized source atomically |
-| Loading/error/retry | Route-level loading/error, history sync banner with Retry, failed send Retry, upload progress/cancel/error                                 |
-| Motion              | Layout + arrival animations, typing indicators, drag-target highlighting, respects `prefers-reduced-motion` CSS                            |
-| Tests               | Redux selector/reconciliation, validation, message list states/forwarding, composer drafts/errors, DB auth/idempotency/forwarding          |
-
-## Rendering strategy (Server versus Client)
+## Architecture
 
 ```text
-app/chats/[conversationId]/page.tsx   SERVER (dynamic request)
-  ├─ cookies() session → membership check
-  ├─ getConversations() + getConversationMessages() from SQLite
-  └─ <ChatProvider initialMessages>       CLIENT boundary
-       └─ <ChatShell>
-            ├─ Redux memoized selectors
-            ├─ useChatSocket()                  typed Socket.IO client
-            ├─ <MessageList>                   animation / draggable messages / keyboard forwarding
-            └─ <Composer>                      controlled input / local draft / XHR upload progress
+src/app/chats/[conversationId]/page.tsx     Server Component
+  └── Authenticated conversation + latest messages from SQLite
+      └── Redux provider / ChatShell         Client boundary
+          ├── MessageList                     Messages, forwarding, status
+          ├── Composer                        Drafts, attachments, validation
+          └── useChatSocket                    Socket lifecycle and replay
 
-server.ts: Node HTTP server + Next request handler + Socket.IO server
-src/lib/server/*: sessions, SQLite, transactional messaging
-app/api/*: authenticated, validated HTTP endpoints
+server.ts                                   Next.js HTTP + Socket.IO
+src/lib/server/                             Auth, database, message transactions
+src/lib/shared/                             Shared DTOs and validation
+src/store/chat-slice.ts                     Normalized messages and outbox
+src/app/api/                                Auth, history replay, media upload
 ```
 
-The root page redirects to `/chats`; `/chats` routes to the first authorized conversation. These are Server Components, not hydration-dependent client `useEffect` fetches. `force-dynamic` / reading auth cookies ensures user-specific HTML is never statically shared. Server data is plain serializable DTOs passed to a **per-conversation** client Redux store. Browser-only elements (draft persistence, socket subscriptions, `XMLHttpRequest` progress, drag and animations) live behind `'use client'`. An initial route loading boundary and error boundary handle slow/failed server renders. The unread message history **syncs after hydration** to fill the SSR→socket connection window; history is not lost in that gap.
+### Rendering boundary
 
-Redux uses plain serializable state, not raw `Socket` or `File` instances. `createSelector` memoizes conversation filtering/sorting and latest-message sidebar previews. React never has to filter/sort the entire message state just because the connection indicator changes.
+`/chats/[conversationId]` loads the authorized conversation and recent message history **on the server**. That avoids a blank chat pane followed by an unnecessary client-side initial fetch, and keeps session/membership checks near the data access. The route is dynamic because its output depends on the authenticated user.
 
-## Message protocol and consistency
+Interactive behavior stays in Client Components: typing, drag-and-forward, local drafts, upload progress, animations, and the Socket.IO connection. Server-rendered messages are passed as serializable data into Redux. Subsequent server events update that same client-side state.
 
-Events (all defined in `src/lib/shared/types.ts`):
+Redux stores plain data rather than sockets, files, or DOM objects. Messages are keyed by server ID; optimistic sends live separately in an outbox keyed by client nonce. `createSelector` memoizes conversation message ordering and sidebar previews, so unrelated state changes do not trigger repeated filtering and sorting.
+
+## Message delivery and recovery
+
+Event payloads are typed in `src/lib/shared/types.ts` and shared by the Socket.IO client and server.
 
 ```text
-client → server: message:send({ conversationId, clientNonce, body, uploadId? }, ack)
-client → server: message:forward({ destinationConversationId, originalMessageId, clientNonce }, ack)
-client → server: typing:set({ conversationId, isTyping })
-server → room: message:new(Message)
-server → room: typing:update({ conversationId, userId, isTyping })
+message:send     client -> server   Message payload + acknowledgment
+message:forward  client -> server   Source/destination IDs + acknowledgment
+typing:set       client -> server   Ephemeral typing state
+message:new      server -> room     Persisted message
+typing:update    server -> room     Ephemeral typing state
 ```
 
-1. Authenticated session cookie identifies the sender. The client cannot pass `senderId`. Each send must belong to an authorized conversation.
-2. The server transaction checks membership, idempotency nonce and optional upload ownership. An INSERT allocates a database-wide monotonic sequence. **Commit happens before broadcast and ACK.**
-3. Receiving clients upsert by server message ID. An optimistic item is identified by `clientNonce` and removed when either the ACK or the broadcast arrives. Receiving the same event twice is harmless.
-4. If disconnected, newly composed text/media metadata is held in an in-memory outbox and flushed on reconnect. On an ambiguous acknowledgment timeout, the item becomes explicitly retryable with its **original nonce**, so retrying cannot create a second message.
-5. Every socket connection/reconnection requests `GET /api/conversations/:id/messages?after=<lastSyncedSeq>`, in pages of up to 100. This **durable DB replay** handles a long outage even when Socket.IO connection-state recovery expires. The replay cursor is _not_ advanced just because a possibly out-of-order push event arrives; that avoids skipping messages in the reconnect race. Duplicate replay/push/ACK messages collapse by ID.
-6. History sync can be manually retried. In-flight fetches are aborted on socket disconnect/route unmount. Each reconnect cancels any prior sync before starting again.
+A normal send follows these steps:
 
-**Ordering:** `seq` is the server insertion order (global, not per-conversation). UI sorts each conversation by this value. Pending optimistic items render after confirmed messages. Client clock timestamps do not control ordering.
+1. The composer queues an optimistic message with a `clientNonce` generated once for that send.
+2. The server resolves sender identity from the authenticated session, checks conversation membership and validates the payload.
+3. A SQLite transaction writes the message. The database has a unique constraint on `(senderId, clientNonce)`; retrying the same send cannot create another row.
+4. After commit, the server acknowledges the sender and broadcasts the persisted message to conversation members.
+5. Redux upserts the persisted message by ID and removes the matching optimistic item by nonce. ACKs, broadcasts, and replayed history can arrive in different orders without creating duplicate UI entries for the same persisted message.
 
-**Forwarding race:** The original is loaded and copied **within one SQLite transaction**. The server authorizes access to both the source and destination. The forwarded message stores a snapshot of source text and its existing media reference; the request does not include editable body or URL. There are no edit/delete endpoints in this assessment, so concurrency with edits/deletions is explicitly deferred. If those endpoints are added, they must use the same transaction/authorization discipline and define snapshot versus current-version semantics.
+**Different sends are different messages**, even when their text is identical. Deduplication is based on identity, not on comparing message bodies.
+
+### Reconnection
+
+Socket reconnection alone is not a durability guarantee. On connection and reconnection, the client requests `GET /api/conversations/:id/messages?after=<sequence>` using the last synchronized sequence for that conversation. The API returns committed messages in sequence order; Redux merges them by ID. The cursor is advanced from ordered database response batches rather than blindly trusting the order of push events.
+
+In-flight history requests use `AbortController` and are cancelled on disconnect or unmount. A failed sync is surfaced with a retry action rather than silently treating the conversation as current.
+
+If a send times out waiting for an ACK, the UI marks it as unconfirmed. Retrying reuses the **original nonce**, because the server may already have committed the first attempt. The client outbox is **in memory**, though: a full page reload while an outgoing message is still offline/queued can lose that unsent item. Received and committed messages remain in SQLite.
+
+### Forwarding
+
+The UI supports dragging a delivered text, image, or video message onto another contact, as well as a keyboard-accessible Forward control. The server checks access to both conversations and copies a snapshot of the source message within a transaction. Clients do not supply a replacement message body or arbitrary media URL.
+
+Edits and deletions are not implemented. Their interaction with forwarding would require explicit version/snapshot semantics; that work is outside this assessment.
+
+## Media uploads
+
+Uploads go through the authenticated `POST /api/upload` route and then Cloudinary. The server enforces a 15 MB limit, an allowlist of supported image/video types, and binary file-type validation rather than trusting the browser's MIME declaration. An upload record is associated with its owner; socket messages reference that upload ID, not a client-provided Cloudinary URL.
+
+The composer supports file selection and drag-and-drop, displays transfer progress, and reports cancel/error states. Images require descriptive alt text for screen reader users; a separate message caption is optional. Forwarded media retains its reference and description.
+
+The progress percentage measures transfer **to the application server**. Cloudinary processing may finish later. The current multipart path buffers small uploads in memory; it is not designed for large video ingest.
 
 ## Security and accessibility
 
-- Logins use bcrypt password hashes, opaque cryptographically random 256-bit session tokens, **SHA-256 token hashes in SQLite**, `HttpOnly`, `SameSite=Lax`, and `Secure` in production. Expired/revoked sessions cannot send new messages (socket event handlers revalidate session). Browser secrets are never placed in `NEXT_PUBLIC_*` values.
-- Origin checks protect HTTP mutations. For reverse-proxy use, set `APP_ORIGIN` to the public origin; configure HTTPS and trusted proxy headers appropriately. Messages are sanitized for control characters and limited to 2,000 characters. React escapes rendered text (not `dangerouslySetInnerHTML`).
-- Upload route validates authenticated ownership, declared and _sniffed_ MIME, max size and Cloudinary configuration. Clients send only a generated `uploadId` over the socket; they cannot spoof a Cloudinary URL. Used upload IDs are not transferable between other users.
-- SQLite access to messages and history enforces membership (not just the UI). User IDs in socket data come exclusively from authenticated sessions.
-- Image attachments require a user-supplied descriptive alt text (validated on the server and preserved on forwards). Interactive chat controls include accessible names, text labels, keyboard navigation, visible focus outlines, and server error announcements with `role="alert"`. Every dragged message can also be forwarded by a button, which works by keyboard. `Enter` sends, `Shift+Enter` inserts a newline. Motion is minimized under OS reduced-motion preferences.
-- **Not end-to-end encrypted.** Authorized backend operators with database/Cloudinary access can view message content. The UI discloses this rather than claiming E2EE.
+- Sender identity comes from the session, never from a `senderId` supplied in a socket event. Message reads, sends, and forwards check membership on the server.
+- Passwords are hashed with bcrypt. Session tokens are random, stored as hashes in SQLite, and issued in `HttpOnly` cookies. State-changing HTTP requests check the configured origin.
+- Message bodies are length-limited and validated server-side. React renders them as text rather than untrusted HTML.
+- File type, size, upload ownership, and one-time upload use are validated on the backend.
+- Forwarding is operable without drag-and-drop. Inputs have accessible labels, failures use readable announcements, images have alt text, and motion respects `prefers-reduced-motion`.
 
-## Reliability and tradeoffs
+Messages are **not end-to-end encrypted**. The application server and authorized operators with access to its storage can read them. Transport security and encrypted storage should be configured for any deployment beyond local evaluation.
 
-- **Refresh:** drafts survive reload and are isolated by user and conversation (but are still browser-local plaintext; clear browser storage on shared devices). Confirmed messages survive restart. The _outbox_, however, is in memory; a hard refresh during an offline queued send can lose that queue item. It is not claimed to be an offline-first app. For stronger offline durability, persist encrypted/local outbox metadata with nonce reuse and a retention policy.
-- **Page size:** initial SSR loads the latest 50 only; older-history upward pagination is not implemented. Replay reads up to 100 messages per page, at most 100 pages per sync attempt; if the cap is hit it exposes Retry rather than silently dropping rows.
-- **Upload path:** HTTP multipart parsing buffers up to 15 MB in memory. A production edge proxy should reject oversized bodies before Node; larger videos need authenticated direct-to-Cloudinary signed/chunked uploads, streaming parsers, scanning, and asset cleanup for abandoned uploads. Upload transfer percentage does not represent Cloudinary processing time.
-- **Failure semantics:** a timed-out ACK is ambiguous: maybe the server committed, maybe not. A retry keeps the nonce. An upload failing after Cloudinary stored a file but before SQLite saved it can orphan an asset; reconciliation jobs are deferred.
-- **Storage & scale:** SQLite WAL and in-process Socket.IO rooms are **single-node only**. Multi-instance production requires PostgreSQL or another shared database, a distributed sequence/outbox strategy, and the Redis Streams Socket.IO adapter (not just ephemeral pub/sub), plus sticky-session decisions. See the Socket.IO [recovery docs](https://socket.io/docs/v4/connection-state-recovery/).
-- **Security hardening before public deployment:** shared distributed rate limiting (login and REST as well as socket), credential enrollment/reset and rotation, richer audit logging, metrics/tracing, session cleanup, database backups/migrations, tighter CSP, abuse reporting, antivirus/content moderation for attachments, media accessibility review, and automated browser E2E tests. Account creation, group chats, edit/delete, and read receipts are out of scope.
-- **Testing:** TypeScript syntax was statically parsed for this assessment, but dependency installation and live browser/socket tests require `npm install` in an environment with package-registry access. Never treat passing source inspection as equivalent to a verified production deploy.
+## Testing
 
-## Test inventory
+The automated suite covers:
 
-`src/store/chat-slice.test.ts` exercises filtering, ordering, selector memoization, replay deduplication and optimistic ACK reconciliation. `src/lib/shared/validation.test.ts` tests unsafe payload and length validation. `src/lib/server/messages.test.ts` tests SQLite transactional idempotence, sender authorization, source authorization, image descriptions/upload ownership and forwarding snapshots. `src/components/message-list.test.tsx` covers loading/error/retry, empty, inbound messages, accessible forward and failed-send retry. `src/components/composer.test.tsx` covers empty send prevention, Enter, draft reload isolation and unsupported media errors.
+| Area | Coverage |
+| --- | --- |
+| Redux | Message ordering, memoized selection, duplicate reconciliation, optimistic sends |
+| Message persistence | Idempotency, membership checks, upload ownership, forwarding transactions |
+| Composer | Empty sends, Enter behavior, per-chat draft persistence, media errors, alt-text validation |
+| Message list | Loading, empty/error states, retry, received messages, keyboard forwarding |
+| Validation | Message and media payload constraints |
 
-CI (`.github/workflows/ci.yml`) installs packages and runs strict TypeScript, Vitest and Next build. For a manual end-to-end check: start the server; sign in in separate browsers as Ada and Grace; send messages in both directions; reload to confirm the draft; disconnect one browser, send from the other, reconnect and observe replay; send a media attachment; drag a message onto Linus or use Forward. All passwords must be set in `.env.local` on first boot.
+At the last local verification, **21 tests passed**, TypeScript checks passed, and the production build completed. GitHub Actions (`.github/workflows/ci.yml`) runs `npm ci`, typecheck, tests, and build on pushes and pull requests to `main`. The production-dependency audit (`npm audit --omit=dev`) reported zero findings after the targeted dependency updates; the full development-dependency audit still needs separate review. These are point-in-time results, not a guarantee about later dependency changes.
+
+For a manual integration pass:
+
+1. Sign in as Ada and Grace in separate browser sessions. Exchange text and media in both directions without refreshing.
+2. Send one message and confirm that ACK/replay do not produce extra bubbles; sending identical text in separate actions should still create separate messages.
+3. Disconnect Grace, send messages from Ada, reconnect Grace, and confirm that missed messages arrive once and in order.
+4. Refresh with an unsent draft in each conversation, then switch conversations to verify isolation.
+5. Forward text and media through both drag-and-drop and the keyboard-accessible control. Check the typing indicator and reduced-motion behavior.
+
+## Known limits and next steps
+
+These are deliberate scope boundaries, not features hidden behind a “production-ready” label:
+
+- **Single-node runtime.** SQLite WAL and in-process Socket.IO rooms assume one persistent Node process. Scaling out requires shared durable storage, a distributed Socket.IO adapter, and a cross-instance delivery/replay strategy.
+- **Offline sends.** Confirmed messages recover on reconnect, but the outbox is not persisted across a browser reload. An offline-first version would need durable client-side queue storage with nonce preservation.
+- **Message history.** The first server render loads the latest 50 messages. Older-history scrolling/pagination is not implemented; reconnect replay is paginated and bounded per attempt.
+- **Media lifecycle.** A failed request after Cloudinary has accepted a file can leave an unreferenced asset. Asset reconciliation, malware scanning, and signed/chunked direct uploads are deferred.
+- **Operational hardening.** Before a public deployment, add distributed rate limits, session maintenance, backups and migrations, structured logs/metrics, content-abuse controls, stronger CSP, and browser-level end-to-end testing.
+- **Product scope.** No group chats, account registration, edit/delete, read receipts, or end-to-end encryption.
+
+For this assessment, I prioritized correct single-node delivery, explicit failure behavior, accessible interactions, and testable state transitions over adding more surface area.
